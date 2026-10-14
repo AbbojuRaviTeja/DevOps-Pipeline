@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: pipelinepulse
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/rules/pipelinepulse_alerts.yml
+
+    scrape_configs:
+      - job_name: "pipelinepulse-collector"
+        static_configs:
+          - targets:
+              - "collector:8000"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: pipelinepulse
+data:
+  pipelinepulse_alerts.yml: |
+    groups:
+      - name: pipelinepulse_alerts
+        rules:
+          - alert: PipelineFailureDetected
+            expr: increase(pipeline_failure_events_total[5m]) > 0
+            for: 0m
+            labels:
+              severity: critical
+              team: devops
+            annotations:
+              summary: "Pipeline failure detected"
+              description: "Pipeline {{ $labels.pipeline }} on {{ $labels.provider }} has experienced a new failure."
+
+          - alert: PipelineFailureThresholdExceeded
+            expr: increase(pipeline_failure_events_total[1h]) >= 5
+            for: 5m
+            labels:
+              severity: critical
+              team: devops
+            annotations:
+              summary: "Pipeline failure threshold exceeded"
+              description: "Pipeline {{ $labels.pipeline }} on {{ $labels.provider }} has experienced 5 or more failures in the last hour."
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: pipelinepulse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: pipelinepulse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:latest
+          ports:
+            - containerPort: 9090
+
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+
+            - name: rules
+              mountPath: /etc/prometheus/rules
+
+            - name: storage
+              mountPath: /prometheus
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+
+        - name: rules
+          configMap:
+            name: prometheus-rules
+
+        - name: storage
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: pipelinepulse
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+  type: ClusterIP
